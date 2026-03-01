@@ -18,12 +18,49 @@ function getAuth() {
   });
 }
 
+function escapeDriveQueryValue(value: string) {
+  return value.replace(/'/g, "\\'");
+}
+
+async function ensureRootFolder(drive: ReturnType<typeof google.drive>) {
+  const escapedRoot = escapeDriveQueryValue(ROOT_FOLDER);
+
+  const rootById = await drive.files.get({
+    fileId: ROOT_FOLDER,
+    fields: "id, mimeType, trashed"
+  }).catch(() => null);
+
+  if (rootById?.data.id && rootById.data.mimeType === "application/vnd.google-apps.folder" && !rootById.data.trashed) {
+    return rootById.data.id;
+  }
+
+  const rootQuery = `name='${escapedRoot}' and mimeType='application/vnd.google-apps.folder' and trashed=false and 'root' in parents`;
+  const existingRoot = await drive.files.list({ q: rootQuery, fields: "files(id)" });
+
+  if (existingRoot.data.files?.[0]?.id) {
+    return existingRoot.data.files[0].id;
+  }
+
+  const createdRoot = await drive.files.create({
+    requestBody: {
+      name: ROOT_FOLDER,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: ["root"]
+    },
+    fields: "id"
+  });
+
+  return createdRoot.data.id ?? "root";
+}
+
 export async function ensureClassFolder(className: string) {
   const auth = getAuth();
   if (!auth) return { folderId: `mock-folder-${className}`, source: "mock" };
 
   const drive = google.drive({ version: "v3", auth });
-  const query = `name='${className}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const rootFolderId = await ensureRootFolder(drive);
+  const escapedClassName = escapeDriveQueryValue(className);
+  const query = `name='${escapedClassName}' and mimeType='application/vnd.google-apps.folder' and trashed=false and '${rootFolderId}' in parents`;
   const existing = await drive.files.list({ q: query, fields: "files(id, name)" });
 
   if (existing.data.files?.[0]?.id) {
@@ -33,12 +70,13 @@ export async function ensureClassFolder(className: string) {
   const created = await drive.files.create({
     requestBody: {
       name: className,
-      mimeType: "application/vnd.google-apps.folder"
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [rootFolderId]
     },
     fields: "id"
   });
 
-  return { folderId: created.data.id ?? ROOT_FOLDER, source: "drive" };
+  return { folderId: created.data.id ?? rootFolderId, source: "drive" };
 }
 
 export async function uploadPdfToDrive(fileName: string, fileBuffer: Buffer, className: string) {
